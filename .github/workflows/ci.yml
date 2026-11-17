@@ -1,0 +1,28 @@
+name: ci
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://app:app@localhost:5434/app
+      PROJECT_NAME: invoice-reconciliation
+      # Secrets can't be used in `if:` directly, so expose only whether one exists.
+      HAS_API_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      # The same Postgres as local dev (compose mounts the init SQL, which a service container can't).
+      - run: docker compose up -d --wait db
+      - run: make data  # PDFs + ERP data the tests read; also checked against evals/sets by a test
+      - run: uv run pytest -q  # no API key needed: model calls go to a fake HTTP transport
+      # Real-API smoke run on 5 dev invoices, only when the repo has an ANTHROPIC_API_KEY secret.
+      - name: eval smoke run
+        if: env.HAS_API_KEY == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          uv run python -m app.cli seed
+          uv run python -m evals.run --split dev --limit 5
